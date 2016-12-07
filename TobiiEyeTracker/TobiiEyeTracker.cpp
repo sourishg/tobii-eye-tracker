@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <conio.h>
 #include <assert.h>
+#include <fstream>
 #include <iostream>
+#include <vector>
 #include "eyex/EyeX.h"
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -18,7 +20,12 @@ using namespace cv;
 
 Mat img;
 Mat img2;
-Point cur_pt;
+Mat scaleFactor;
+Point cur_pt = Point(0, 0);
+Point last_pt = Point(0, 0);
+int scale_inc = 20;
+ofstream out_file;
+vector< Point > pts;
 
 #pragma comment (lib, "Tobii.EyeX.Client.lib")
 
@@ -101,6 +108,11 @@ void TX_CALLCONVENTION OnEngineConnectionStateChanged(TX_CONNECTIONSTATE connect
 	}
 }
 
+float getVel(int x2, int y2, int x1, int y1) {
+	float dx = (x2 - x1);
+	float dy = (y2 - y1);
+	return sqrt(dx*dx + dy*dy);
+}
 /*
 * Handles an event from the Gaze Point data stream.
 */
@@ -110,14 +122,16 @@ void OnGazeDataEvent(TX_HANDLE hGazeDataBehavior)
 	if (txGetGazePointDataEventParams(hGazeDataBehavior, &eventParams) == TX_RESULT_OK) {
 		cur_pt.x = eventParams.X;
 		cur_pt.y = eventParams.Y;
-		printf("Gaze Data: (%.1f, %.1f) timestamp %.0f ms\n", eventParams.X, eventParams.Y, eventParams.Timestamp);
+		pts.push_back(cur_pt);
+		float vel = getVel(cur_pt.x, cur_pt.y, last_pt.x, last_pt.y);
+		printf("Gaze Data: (%.1f, %.1f); Velocity: %.2f; timestamp %.0f ms\n", eventParams.X, eventParams.Y, vel, eventParams.Timestamp);
+		out_file << cur_pt.x << "," << cur_pt.y << "," << vel << endl;
+		last_pt.x = eventParams.X;
+		last_pt.y = eventParams.Y;
 	}
 	else {
 		printf("Failed to interpret gaze data event packet.\n");
 	}
-	//imshow("IMG", img);
-	//waitKey(1);
-	//printf("Failed to interpret gaze data event packet.\n");
 }
 
 /*
@@ -155,15 +169,18 @@ bool inImg(int x, int y) {
 
 int main(int argc, char* argv[])
 {
+	out_file.open("data.csv");
 	TX_CONTEXTHANDLE hContext = TX_EMPTY_HANDLE;
 	TX_TICKET hConnectionStateChangedTicket = TX_INVALID_TICKET;
 	TX_TICKET hEventHandlerTicket = TX_INVALID_TICKET;
 	BOOL success;
 	int mode = 2;
-	namedWindow("IMG", CV_WINDOW_FULLSCREEN);
-	img = imread("C:\\Users\\Aditya\\Documents\\Visual Studio 2013\\Projects\\SampleEyeXApp\\Debug\\cesc.jpg", 1);
+	const char* window = "IMG";
+	namedWindow(window, CV_WINDOW_NORMAL);
+	setWindowProperty(window, CV_WND_PROP_FULLSCREEN, CV_WINDOW_FULLSCREEN);
+	img = imread("gogh2.jpg", 1);
 	img2 = Mat(img.rows, img.cols, CV_8UC3, Scalar(0, 0, 0));
-
+	scaleFactor = Mat(img.rows, img.cols, CV_8UC1, Scalar(0));
 	// initialize and enable the context that is our link to the EyeX Engine.
 	success = txInitializeEyeX(TX_EYEXCOMPONENTOVERRIDEFLAG_NONE, NULL, NULL, NULL, NULL) == TX_RESULT_OK;
 	success &= txCreateContext(&hContext, TX_FALSE) == TX_RESULT_OK;
@@ -181,29 +198,70 @@ int main(int argc, char* argv[])
 	}
 	while (1)
 	{
+		if (waitKey(30) > 0) {
+			break;
+		}
 		if (mode == 1) {
 			Mat img1 = img.clone();
 			circle(img1, cur_pt, 15, Scalar(0, 0, 255), -1, 8, 0);
-			imshow("IMG", img1);
+			imshow(window, img1);
 		}
 		else {
-			int w = 30;
+			int w = 50;
 			for (int i = -w; i <= w; i++) {
 				for (int j = -w; j <= w; j++) {
 					if (inImg(cur_pt.x + i, cur_pt.y + j)) {
 						img2.at<Vec3b>(cur_pt.y + j, cur_pt.x + i) = img.at<Vec3b>(cur_pt.y + j, cur_pt.x + i);
+						int scale = (int)scaleFactor.at<uchar>(cur_pt.y + j, cur_pt.x + i);
+						if (scale + scale_inc < 255)
+							scaleFactor.at<uchar>(cur_pt.y + j, cur_pt.x + i) = scale + scale_inc;
 					}
 				}
 			}
-			imshow("IMG", img2);
+			imshow(window, img2);
 		}
-		if (waitKey(20) > 0)
-			break;
 	}
+	Mat heatmap = Mat(img.rows, img.cols, CV_8UC3, Scalar(0, 0, 0));
+	for (int i = 0; i < img.cols; i++) {
+		for (int j = 0; j < img.rows; j++) {
+			int scale = (int)scaleFactor.at<uchar>(j, i);
+			int r = img.at<Vec3b>(j, i)[2];
+			int g = img.at<Vec3b>(j, i)[1];
+			int b = img.at<Vec3b>(j, i)[0];
+			if (scale == 0) scale = scale_inc;
+			if (scale < 85) {
+				heatmap.at<Vec3b>(j, i)[2] = 0;
+				heatmap.at<Vec3b>(j, i)[1] = g;
+				heatmap.at<Vec3b>(j, i)[0] = 0;
+			}
+			else if (scale > 85 && scale < 170) {
+				heatmap.at<Vec3b>(j, i)[2] = (r+g)/2;
+				heatmap.at<Vec3b>(j, i)[1] = (r+g)/2;
+				heatmap.at<Vec3b>(j, i)[0] = 0;
+			}
+			else {
+				heatmap.at<Vec3b>(j, i)[2] = r;
+				heatmap.at<Vec3b>(j, i)[1] = 0;
+				heatmap.at<Vec3b>(j, i)[0] = 0;
+			}
+			/*
+			heatmap.at<Vec3b>(j, i)[2] = ((float)scale / 255.) * (float)r;
+			heatmap.at<Vec3b>(j, i)[1] = ((float)scale / 255.) * (float)g;
+			heatmap.at<Vec3b>(j, i)[0] = ((float)scale / 255.) * (float)b;
+			*/
+		}
+	}
+	imwrite("scalefactor.jpg", scaleFactor);
+	imwrite("heatmap.jpg", heatmap);
+	for (int i = 1; i < pts.size(); i++) {
+		line(img, pts[i], pts[i - 1], Scalar(0, 0, 255), 2, 8, 0);
+	}
+	imwrite("gaze_pattern.jpg", img);
+
 	printf("Press any key to exit...\n");
 	_getch();
 	printf("Exiting.\n");
-
+	out_file.close();
 	// disable and delete the context.
 	txDisableConnection(hContext);
 	txReleaseObject(&g_hGlobalInteractorSnapshot);
